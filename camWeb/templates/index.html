@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title> WebRTC DataChannel</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            background: #121212;
+            color: white;
+            margin: 0;
+            padding: 10px;
+        }
+        #container {
+            position: relative;
+            max-width: 640px;
+            margin: 0 auto;
+            display: inline-block;
+        }
+        /* Video provides the live background */
+        video {
+            width: 100%;
+            height: auto;
+            border-radius: 8px;
+            border: 2px solid #333;
+            display: block;
+        }
+        /* Canvas sits exactly on top of the video to draw AI masks */
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            border-radius: 8px;
+        }
+        #status {
+            margin: 10px 0;
+            font-weight: bold;
+            color: #00e676;
+        }
+    </style>
+</head>
+<body>
+
+    <h2> WebRTC Tracking</h2>
+    <div id="status">Starting Camera...</div>
+    
+    <div id="container">
+        <!-- Live Camera Feed -->
+        <video id="localVideo" autoplay playsinline muted></video>
+        <!-- AI Polygons Rendering Overlay -->
+        <canvas id="overlayCanvas"></canvas>
+    </div>
+
+<script>
+    const video = document.getElementById('localVideo');
+    const canvas = document.getElementById('overlayCanvas');
+    const ctx = canvas.getContext('2d');
+    const status = document.getElementById('status');
+    let pc = null;
+
+    const PALETTE = [
+        { stroke: '#00e5ff', fill: 'rgba(0, 229, 255, 0.28)' }, // Neon Cyan
+        { stroke: '#ff007f', fill: 'rgba(255, 0, 127, 0.28)' }, // Neon Pink
+        { stroke: '#00ff66', fill: 'rgba(0, 255, 102, 0.28)' }, // Lime Green
+        { stroke: '#ffb703', fill: 'rgba(255, 183, 3, 0.28)' },  // Warm Amber
+        { stroke: '#9d4edd', fill: 'rgba(157, 78, 221, 0.28)' }, // Electric Purple
+        { stroke: '#ff3333', fill: 'rgba(255, 51, 51, 0.28)' }   // Coral Red
+    ];
+
+    function drawPolygons(polygons) {
+        // Match canvas internal resolution to video display resolution
+        if (canvas.width !== video.clientWidth) {
+            canvas.width = video.clientWidth;
+            canvas.height = video.clientHeight;
+        }
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.lineWidth = 2.5;
+        ctx.lineJoin = "round";
+        ctx.strokeStyle = '#00ff00'; 
+        ctx.fillStyle = 'rgba(0, 255, 0, 0.25)';
+
+        polygons.forEach(obj => {
+            const poly = obj.points;
+            if (!poly || poly.length < 3) return;
+
+            // Pick distinct color based on the object's color_id
+            const color = PALETTE[obj.color_id % PALETTE.length];
+            ctx.strokeStyle = color.stroke;
+            ctx.fillStyle = color.fill;
+
+            ctx.beginPath();
+            ctx.moveTo(poly[0][0] * canvas.width, poly[0][1] * canvas.height);
+            for (let i = 1; i < poly.length; i++) {
+                ctx.lineTo(poly[i][0] * canvas.width, poly[i][1] * canvas.height);
+            }
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+        });
+    }
+
+    async function start() {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                audio: false,
+                video: { facingMode: { ideal: "environment" }, width: { ideal: 640 }, height: { ideal: 480 } }
+            });
+
+            // Instant local preview
+            video.srcObject = stream;
+
+            pc = new RTCPeerConnection();
+            stream.getTracks().forEach(track => pc.addTrack(track, stream));
+
+            // Create DataChannel to receive JSON coordinates from Python
+            const dc = pc.createDataChannel("segmentation");
+            
+            dc.onopen = () => {
+                status.innerText = "Connected: Active";
+                status.style.color = "#00ff00";
+            };
+
+            dc.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                if (data.polygons) {
+                    drawPolygons(data.polygons);
+                }
+            };
+
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+
+            const response = await fetch('/offer', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type })
+            });
+
+            const answer = await response.json();
+            await pc.setRemoteDescription(new RTCSessionDescription(answer));
+
+        } catch (err) {
+            status.innerText = "Error: " + err.message;
+            status.style.color = "#ff5252";
+            console.error(err);
+        }
+    }
+
+    // Wait until video metadata loads to start so canvas sizes correctly
+    video.onloadedmetadata = () => {
+        canvas.width = video.clientWidth;
+        canvas.height = video.clientHeight;
+    };
+
+    start();
+</script>
+</body>
+</html>
